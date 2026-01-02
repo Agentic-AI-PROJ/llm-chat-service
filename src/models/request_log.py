@@ -11,6 +11,7 @@ class RequestLog(BaseModel):
     total_tokens: int = 0
     response_time_ms: float
     success: bool
+    grounding_enabled: Optional[bool] = False
     input_text: Optional[str] = None
     output_text: Optional[str] = None
     error_message: Optional[str] = None

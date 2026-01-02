@@ -17,6 +17,7 @@ class AIModelCreate(BaseModel):
         "input_types": ["text"],
         "output_types": ["text"]
     })
+    groundings: Optional[dict] = Field(default_factory=lambda: {"websearch": 0})
     details: dict = Field(default_factory=lambda: {"requests_per_day": None, "requests_per_minute": None})
 
 class AIModel(AIModelCreate):
