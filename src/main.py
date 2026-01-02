@@ -19,6 +19,8 @@ from src.routes.model_routes import router as model_router
 from src.routes.log_routes import router as log_router
 from src.utils.token_counter import count_tokens, count_messages_tokens
 from bson import ObjectId
+from src.utils.limit_checker import check_grounding_limit
+
 
 
 # Load environment variables
@@ -142,46 +144,105 @@ async def non_stream(chat_request: ChatRequest, request: Request):
             "total_tokens": 0,
             "response_time_ms": 0,
             "input_text": str(chat_request.messages),
-            "output_text": ""
+            "output_text": "",
+            "grounding_enabled": False
         }
         
         try:
             gemini_api_key = selected_model.get("api_key")
             if not gemini_api_key:
                 logger.error(f"Missing API key for model {selected_model.get('name')}")
-                # Don't fail hard, just try next model but log this one failed
                 log_data["error_message"] = "Model API key not configured"
                 log_data["response_time_ms"] = (time.time() - start_time) * 1000
                 await track_request(log_data)
                 continue
 
+            # Check grounding enablement and limits
+            tools = None
+            if chat_request.enable_grounding:
+                is_allowed = await check_grounding_limit(str(model_id))
+                if not is_allowed:
+                    # Fail fast if limit exceeded? Or fallback to no-grounding?
+                    # User said "make sure the limit does not cross the limit", implies stopping it.
+                    # Since the user requested "enable grounding", better to fail the request or just disable grounding.
+                    # Failing is safer to indicate limit reached.
+                    raise HTTPException(status_code=429, detail="Daily grounding limit exceeded for this model.")
+                
+                log_data["grounding_enabled"] = True
+                tools = [{"google_search": {}}]
+
             # Check for max_input_tokens limit
             model_details = selected_model.get("details", {})
+            # Check if using native Google Grounding
+            if chat_request.enable_grounding:
+                 # Verify it is a google model
+                 if "gemini" in selected_model.get("model_id", "").lower() or selected_model.get("base_url", "").find("googleapis") != -1:
+                     from src.utils.google_genai_helper import generate_with_google
+                     
+                     logger.info(f"Using Native Google Client for grounding with model {selected_model.get('name')}")
+                     
+                     # Check limit
+                     is_allowed = await check_grounding_limit(
+                        model_id=str(model_id),
+                        limit_type="websearch"
+                     )
+                     
+                     if not is_allowed:
+                         logger.warning(f"Grounding limit exceeded for model {selected_model.get('name')}")
+                         raise HTTPException(status_code=429, detail="Daily grounding limit exceeded for this model.")
+                     
+                     log_data["grounding_enabled"] = True
+                     
+                     # Call native helper
+                     native_response = await generate_with_google(
+                         model_id=selected_model.get("model_id"),
+                         api_key=gemini_api_key,
+                         messages=chat_request.messages,
+                         enable_grounding=True
+                     )
+                     
+                     contact = native_response.get("content", "")
+                     # Usage parsing if available (native_response['usage'] might be object)
+                     usage = native_response.get("usage")
+                     if usage:
+                         log_data["input_tokens"] = getattr(usage, 'prompt_token_count', 0)
+                         log_data["output_tokens"] = getattr(usage, 'candidates_token_count', 0)
+                         log_data["total_tokens"] = getattr(usage, 'total_token_count', 0)
+                     
+                     log_data["success"] = True
+                     log_data["response_time_ms"] = (time.time() - start_time) * 1000
+                     log_data["output_text"] = contact
+                     await track_request(log_data)
+                     
+                     logger.info(f"Successfully generated grounded response with model {selected_model.get('name')}")
+                     return {"data": contact}
+            
+            # Standard LiteLLM flow for non-grounding or non-Google models
             max_input_tokens = model_details.get("max_input_tokens")
             
             if max_input_tokens:
                 model_id_str = selected_model.get("model_id", "gpt-4")
-                # Note: Token counting for images might be inaccurate with simple text counter
-                # For now we rely on existing text-based logic or assume it handles string representation
                 input_tokens = count_messages_tokens(chat_request.messages, model_id_str)
                 
                 if input_tokens > max_input_tokens:
                     logger.warning(f"Input tokens ({input_tokens}) exceeded limit ({max_input_tokens}) for model {selected_model.get('name')}")
-                    # This is a client error (request too long), so we should stop and tell them
                     raise HTTPException(
                         status_code=400, 
                         detail=f"Request too long. Input tokens ({input_tokens}) exceeds model limit of {max_input_tokens}."
                     )
 
+            completion_kwargs = {
+                "model": selected_model.get("model_id"),
+                "messages": chat_request.messages,
+                "api_key": gemini_api_key,
+                "base_url": selected_model.get("base_url", "https://generativelanguage.googleapis.com/v1beta"),
+                "drop_params": True,
+                "stream": False
+            }
+            if tools:
+                completion_kwargs["tools"] = tools
 
-            response = completion(
-                model=selected_model.get("model_id"),
-                messages=chat_request.messages,
-                api_key=gemini_api_key,
-                base_url=selected_model.get("base_url", "https://generativelanguage.googleapis.com/v1beta"),
-                drop_params=True,
-                stream=False
-            )
+            response = completion(**completion_kwargs)
 
             logger.info(f"Response: {response}")
             
