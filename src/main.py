@@ -215,7 +215,7 @@ async def non_stream(chat_request: ChatRequest, request: Request):
                      await track_request(log_data)
                      
                      logger.info(f"Successfully generated grounded response with model {selected_model.get('name')}")
-                     return {"data": contact}
+                     return {"data": contact, "citations": native_response.get("citations", [])}
             
             # Standard LiteLLM flow for non-grounding or non-Google models
             max_input_tokens = model_details.get("max_input_tokens")

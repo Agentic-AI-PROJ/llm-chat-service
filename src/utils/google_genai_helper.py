@@ -26,6 +26,28 @@ def _convert_messages_to_google_format(messages: List[Dict[str, Any]]) -> str:
     
     return full_prompt.strip()
 
+def get_grounding_links(response):
+    """
+    Extracts unique search/grounding links from a Genie/Gemini response object.
+    """
+    links = []
+    
+    # Ensure the response has candidates and grounding metadata
+    if not response.candidates:
+        return links
+    
+    # Access the first candidate's grounding metadata
+    metadata = response.candidates[0].grounding_metadata
+    
+    if metadata and metadata.grounding_chunks:
+        for chunk in metadata.grounding_chunks:
+            # Check if the chunk contains a web source
+            if chunk.web:
+                links.append(chunk.web.title)
+                
+    # Return a unique list of URLs
+    return list(set(links))
+
 async def generate_with_google(
     model_id: str,
     api_key: str,
@@ -80,8 +102,11 @@ async def generate_with_google(
         )
         
     response = await asyncio.to_thread(_call_google)
+
+    logger.info(f"Response: {response}")
     
     return {
         "content": response.text,
+        "citations": get_grounding_links(response),
         "usage": response.usage_metadata # Might need conversion
     }
